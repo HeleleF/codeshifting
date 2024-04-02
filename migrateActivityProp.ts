@@ -13,6 +13,8 @@ import type {
   TSNonNullExpression,
   CallExpression,
   ImportDeclaration,
+  FunctionExpression,
+  Options,
 } from "jscodeshift";
 
 const REMOVED_PROP_NAME = "activity";
@@ -23,8 +25,13 @@ const SELECTED_VAR_NAME = "selectedActivity";
 
 // bei normal: 2mal ausführen erzeugt ein extra selector call
 // bei spreading von props: -> activity.lock wird zu activityId
+// wenn activity inline definiert ist als typeanno von props, muss das auch umbennant werden
 
-export default function transformer(file: FileInfo, { jscodeshift }: API) {
+export default function transformer(
+  file: FileInfo,
+  { jscodeshift }: API,
+  options: Options
+) {
   const j = jscodeshift.withParser("tsx");
 
   const root = j(file.source);
@@ -38,6 +45,14 @@ export default function transformer(file: FileInfo, { jscodeshift }: API) {
     .forEach((path) => {
       wasChanged = migrate(path) || wasChanged;
     });
+
+  root
+    .find(j.FunctionExpression)
+    .filter(isReactFC)
+    .forEach((path) => {
+      wasChanged = migrate(path) || wasChanged;
+    });
+
   root
     .find(j.ArrowFunctionExpression)
     .filter(isReactFC)
@@ -52,7 +67,9 @@ export default function transformer(file: FileInfo, { jscodeshift }: API) {
   return wasChanged ? root.toSource() : file.source;
 
   function isReactFC(
-    path: ASTPath<FunctionDeclaration | ArrowFunctionExpression>
+    path: ASTPath<
+      FunctionDeclaration | FunctionExpression | ArrowFunctionExpression
+    >
   ): boolean {
     const returnStatements = j(path).find(j.ReturnStatement);
 
@@ -106,8 +123,10 @@ export default function transformer(file: FileInfo, { jscodeshift }: API) {
     );
   }
 
-  function addToFile(...elements: unknown[]): void {
-    root.get().node.program.body.unshift(...elements);
+  function addToFile(...imports: ImportDeclaration[]): void {
+    const program = root.find(j.Program).paths().at(0)?.node;
+
+    program?.body.unshift(...imports);
   }
 
   function reduxImport(): ImportDeclaration {
@@ -125,6 +144,10 @@ export default function transformer(file: FileInfo, { jscodeshift }: API) {
   }
 
   function updateImports(): void {
+    const program = root.find(j.Program).paths().at(0)?.node;
+    const firstStatement = program?.body.at(0);
+    const comments = firstStatement?.comments;
+
     const importsDeclarations = root.find(j.ImportDeclaration);
     if (importsDeclarations.length === 0) {
       addToFile(reduxImport(), clientImport());
@@ -165,12 +188,17 @@ export default function transformer(file: FileInfo, { jscodeshift }: API) {
       addToFile(clientImport());
     }
 
-    // wenn noch kein von activity, add einen mit ActivitySelectors
-    // wenn noch kein von redux, add einen mit useSelector
+    const firstStatementNew = program?.body.at(0);
+    if (firstStatementNew !== firstStatement) {
+      firstStatement!.comments = comments?.filter((c) => c.trailing);
+      firstStatementNew!.comments = comments?.filter((c) => c.leading);
+    }
   }
 
   function migrateIdentifier(
-    path: ASTPath<FunctionDeclaration | ArrowFunctionExpression>,
+    path: ASTPath<
+      FunctionDeclaration | FunctionExpression | ArrowFunctionExpression
+    >,
     propsName: string
   ): boolean {
     let changed = false;
@@ -247,7 +275,9 @@ export default function transformer(file: FileInfo, { jscodeshift }: API) {
   }
 
   function migrateObjectPattern(
-    path: ASTPath<FunctionDeclaration | ArrowFunctionExpression>,
+    path: ASTPath<
+      FunctionDeclaration | FunctionExpression | ArrowFunctionExpression
+    >,
     properties: ObjectPattern["properties"]
   ): boolean {
     const restElement = properties.find((p): p is RestElement =>
@@ -350,7 +380,9 @@ export default function transformer(file: FileInfo, { jscodeshift }: API) {
   }
 
   function migrate(
-    path: ASTPath<FunctionDeclaration | ArrowFunctionExpression>
+    path: ASTPath<
+      FunctionDeclaration | FunctionExpression | ArrowFunctionExpression
+    >
   ): boolean {
     const propsParam = path.value.params[0];
 
